@@ -1,4 +1,6 @@
 from flask import Flask, request, jsonify
+from pydub import AudioSegment
+import io
 from flask_cors import CORS
 from pathlib import Path
 import numpy as np
@@ -26,15 +28,26 @@ def register_speaker():
     if not name or not file:
         return jsonify({"error": "Missing name or file"}), 400
 
+    # Convert any format to WAV using pydub
     audio_bytes = file.read()
-    mfcc = features.extract_mfcc(audio_bytes)
+    audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
+    wav_io = io.BytesIO()
+    audio.export(wav_io, format="wav")
+    wav_io.seek(0)
+
+    # Extract MFCC from WAV bytes
+    mfcc = features.extract_mfcc(wav_io.read())
     emb = embedding_model.get_embedding(mfcc)
+
+    # Save embedding
     emb_path = EMB_DIR / f"{name}.npy"
     np.save(emb_path, emb)
 
+    # Update speaker database
     speakers = json.loads(SPEAKER_FILE.read_text())
     speakers.append({"name": name, "path": str(emb_path)})
     SPEAKER_FILE.write_text(json.dumps(speakers, indent=2))
+
     return jsonify({"status": "ok", "speaker": name})
 
 
@@ -45,8 +58,15 @@ def transcribe_audio():
     if not file:
         return jsonify({"error": "Missing file"}), 400
 
+    # Convert any format to WAV using pydub
     audio_bytes = file.read()
-    segments = asr.transcribe_and_segment(audio_bytes)
+    audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
+    wav_io = io.BytesIO()
+    audio.export(wav_io, format="wav")
+    wav_io.seek(0)
+
+
+    segments = asr.transcribe_and_segment(wav_io.read())
 
     speakers = json.loads(SPEAKER_FILE.read_text())
     known_embs = {s["name"]: np.load(s["path"]) for s in speakers}
@@ -55,6 +75,9 @@ def transcribe_audio():
         mfcc = features.extract_mfcc(seg["audio"])
         emb = embedding_model.get_embedding(mfcc)
         seg["speaker"] = matching.find_best_match(emb, known_embs)
+        seg.pop("audio", None)  # remove raw bytes
+
+    print(segments)
 
     return jsonify({"segments": segments})
 
